@@ -1,0 +1,483 @@
+#!/bin/bash
+set -euo pipefail
+
+# ── Configuration ────────────────────────────────────────────
+
+PACKER_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="${PACKER_DATA_DIR:-$HOME/.packer}"
+HOME_DIR="$HOME"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# Flags
+FORCE=false
+DRY_RUN=false
+
+# ── Helpers ──────────────────────────────────────────────────
+
+info()  { echo -e "${BLUE}::${RESET} $*"; }
+ok()    { echo -e "${GREEN}✓${RESET} $*"; }
+warn()  { echo -e "${YELLOW}!${RESET} $*"; }
+err()   { echo -e "${RED}✗${RESET} $*" >&2; }
+
+ensure_data_dir() {
+    if [[ ! -d "$DATA_DIR" ]]; then
+        if $FORCE; then
+            mkdir -p "$DATA_DIR"
+        else
+            echo -en "${YELLOW}Data directory $DATA_DIR does not exist. Create it? [Y/n]${RESET} "
+            read -r answer
+            [[ "$answer" =~ ^[Nn]$ ]] && { info "Aborted."; exit 0; }
+            mkdir -p "$DATA_DIR"
+            ok "Created $DATA_DIR"
+        fi
+    fi
+}
+
+# Read a profile's packer.conf, emit one path per line (skip blanks/comments)
+read_conf() {
+    local profile="$1"
+    local conf="$DATA_DIR/$profile/packer.conf"
+    if [[ ! -f "$conf" ]]; then
+        err "Config not found: $conf"
+        exit 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+        echo "$line"
+    done < "$conf"
+}
+
+# List all profiles (directories in DATA_DIR that contain packer.conf)
+list_profiles() {
+    if [[ ! -d "$DATA_DIR" ]]; then
+        return
+    fi
+    for dir in "$DATA_DIR"/*/; do
+        [[ -f "$dir/packer.conf" ]] && basename "$dir"
+    done | sort
+}
+
+# Resolve profile args: if none given, use all profiles (sorted)
+resolve_profiles() {
+    if [[ $# -eq 0 ]]; then
+        local profiles
+        profiles=$(list_profiles)
+        if [[ -z "$profiles" ]]; then
+            err "No profiles found in $DATA_DIR"
+            exit 1
+        fi
+        echo "$profiles"
+    else
+        for p in "$@"; do
+            if [[ ! -d "$DATA_DIR/$p" || ! -f "$DATA_DIR/$p/packer.conf" ]]; then
+                err "Profile not found: $p"
+                exit 1
+            fi
+            echo "$p"
+        done
+    fi
+}
+
+# Normalize a path to be relative to $HOME
+normalize_path() {
+    local p="$1"
+    if [[ "$p" == "~"* ]]; then
+        p="${HOME_DIR}${p#\~}"
+    fi
+    if [[ "$p" == "$HOME_DIR/"* ]]; then
+        p="${p#"$HOME_DIR"/}"
+    fi
+    p="${p%/}"
+    echo "$p"
+}
+
+# ── Commands ─────────────────────────────────────────────────
+
+cmd_backup_dots() {
+    local profiles=()
+    while IFS= read -r p; do profiles+=("$p"); done < <(resolve_profiles "$@")
+
+    for profile in "${profiles[@]}"; do
+        local dots_dir="$DATA_DIR/$profile/dotfiles"
+        info "${BOLD}[$profile]${RESET} Backing up dotfiles"
+        local count=0
+        while IFS= read -r rel; do
+            local src="$HOME_DIR/$rel"
+            local dst="$dots_dir/$rel"
+            if [[ ! -e "$src" ]]; then
+                warn "Skipping (not found): ~/$rel"
+                continue
+            fi
+            if $DRY_RUN; then
+                echo "  [dry-run] ~/$rel → $profile/dotfiles/$rel"
+            else
+                mkdir -p "$(dirname "$dst")"
+                if [[ -d "$src" ]]; then
+                    rsync -a --delete --exclude='.DS_Store' "$src/" "$dst/"
+                else
+                    rsync -a --exclude='.DS_Store' "$src" "$dst"
+                fi
+                ok "~/$rel"
+            fi
+            ((count++))
+        done < <(read_conf "$profile")
+        info "Backed up $count item(s)"
+    done
+}
+
+cmd_restore_dots() {
+    local profiles=()
+    while IFS= read -r p; do profiles+=("$p"); done < <(resolve_profiles "$@")
+
+    if ! $FORCE && ! $DRY_RUN; then
+        local names="${profiles[*]}"
+        echo -en "${YELLOW}Restore dotfiles from [${names}]? This will overwrite files in ~. [y/N]${RESET} "
+        read -r answer
+        [[ "$answer" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
+    fi
+
+    for profile in "${profiles[@]}"; do
+        local dots_dir="$DATA_DIR/$profile/dotfiles"
+        info "${BOLD}[$profile]${RESET} Restoring dotfiles"
+        local count=0
+        while IFS= read -r rel; do
+            local src="$dots_dir/$rel"
+            local dst="$HOME_DIR/$rel"
+            if [[ ! -e "$src" ]]; then
+                warn "Skipping (not in repo): $profile/dotfiles/$rel"
+                continue
+            fi
+            if $DRY_RUN; then
+                echo "  [dry-run] $profile/dotfiles/$rel → ~/$rel"
+            else
+                mkdir -p "$(dirname "$dst")"
+                if [[ -d "$src" ]]; then
+                    rsync -a --delete --exclude='.DS_Store' "$src/" "$dst/"
+                else
+                    rsync -a --exclude='.DS_Store' "$src" "$dst"
+                fi
+                ok "~/$rel"
+            fi
+            ((count++))
+        done < <(read_conf "$profile")
+        info "Restored $count item(s)"
+    done
+}
+
+cmd_backup_brew() {
+    local profiles=()
+    while IFS= read -r p; do profiles+=("$p"); done < <(resolve_profiles "$@")
+
+    for profile in "${profiles[@]}"; do
+        local brewfile="$DATA_DIR/$profile/Brewfile"
+        info "${BOLD}[$profile]${RESET} Generating Brewfile"
+        if $DRY_RUN; then
+            echo "  [dry-run] brew bundle dump → $brewfile"
+        else
+            brew bundle dump --file="$brewfile" --force
+            ok "Brewfile written ($(wc -l < "$brewfile" | tr -d ' ') entries)"
+            if [[ $(list_profiles | wc -l) -gt 1 ]]; then
+                warn "Curate $brewfile to contain only $profile-specific packages"
+            fi
+        fi
+    done
+}
+
+cmd_restore_brew() {
+    local profiles=()
+    while IFS= read -r p; do profiles+=("$p"); done < <(resolve_profiles "$@")
+
+    for profile in "${profiles[@]}"; do
+        local brewfile="$DATA_DIR/$profile/Brewfile"
+        if [[ ! -f "$brewfile" ]]; then
+            warn "[$profile] No Brewfile found, skipping"
+            continue
+        fi
+        info "${BOLD}[$profile]${RESET} Installing from Brewfile"
+        if $DRY_RUN; then
+            echo "  [dry-run] brew bundle install --file=$brewfile"
+        else
+            brew bundle install --file="$brewfile"
+            ok "Brew bundle install complete"
+        fi
+    done
+}
+
+cmd_diff() {
+    local profiles=()
+    while IFS= read -r p; do profiles+=("$p"); done < <(resolve_profiles "$@")
+    local has_diff=false
+
+    for profile in "${profiles[@]}"; do
+        local dots_dir="$DATA_DIR/$profile/dotfiles"
+        local profile_has_diff=false
+        while IFS= read -r rel; do
+            local live="$HOME_DIR/$rel"
+            local repo="$dots_dir/$rel"
+            if [[ ! -e "$live" && ! -e "$repo" ]]; then
+                continue
+            fi
+            if [[ ! -e "$repo" ]]; then
+                if ! $profile_has_diff; then
+                    echo -e "\n${BOLD}── $profile ──${RESET}"
+                    profile_has_diff=true
+                fi
+                warn "~/$rel exists but not backed up"
+                has_diff=true
+                continue
+            fi
+            if [[ ! -e "$live" ]]; then
+                if ! $profile_has_diff; then
+                    echo -e "\n${BOLD}── $profile ──${RESET}"
+                    profile_has_diff=true
+                fi
+                warn "~/$rel missing but exists in repo"
+                has_diff=true
+                continue
+            fi
+            local output
+            if output=$(diff -ru --exclude='.DS_Store' "$repo" "$live" 2>/dev/null); then
+                :
+            else
+                has_diff=true
+                if ! $profile_has_diff; then
+                    echo -e "\n${BOLD}── $profile ──${RESET}"
+                    profile_has_diff=true
+                fi
+                echo -e "${BOLD}─── ~/$rel ───${RESET}"
+                echo "$output" | while IFS= read -r dline; do
+                    case "$dline" in
+                        ---*) echo -e "${RED}$dline${RESET}" ;;
+                        +++*) echo -e "${GREEN}$dline${RESET}" ;;
+                        @@*)  echo -e "${BLUE}$dline${RESET}" ;;
+                        -*)   echo -e "${RED}$dline${RESET}" ;;
+                        +*)   echo -e "${GREEN}$dline${RESET}" ;;
+                        *)    echo "$dline" ;;
+                    esac
+                done
+                echo
+            fi
+        done < <(read_conf "$profile")
+    done
+
+    if ! $has_diff; then
+        ok "Everything is in sync"
+    fi
+}
+
+cmd_list() {
+    local profiles=()
+    while IFS= read -r p; do profiles+=("$p"); done < <(resolve_profiles "$@")
+
+    for profile in "${profiles[@]}"; do
+        local dots_dir="$DATA_DIR/$profile/dotfiles"
+        echo -e "\n${BOLD}── $profile ──${RESET}"
+        printf "${BOLD}%-40s  %-6s  %-6s${RESET}\n" "PATH" "HOME" "REPO"
+        printf "%-40s  %-6s  %-6s\n" "────────────────────────────────────────" "──────" "──────"
+        while IFS= read -r rel; do
+            local in_home in_repo
+            if [[ -e "$HOME_DIR/$rel" ]]; then
+                in_home="${GREEN}yes${RESET}   "
+            else
+                in_home="--    "
+            fi
+            if [[ -e "$dots_dir/$rel" ]]; then
+                in_repo="${GREEN}yes${RESET}"
+            else
+                in_repo="--"
+            fi
+            echo -e "$(printf '%-40s' "~/$rel")  $in_home $in_repo"
+        done < <(read_conf "$profile")
+    done
+}
+
+cmd_add() {
+    if [[ $# -lt 2 ]]; then
+        err "Usage: packer add <profile> <path>"
+        exit 1
+    fi
+    local profile="$1"
+    local raw_path="$2"
+    local rel
+    rel=$(normalize_path "$raw_path")
+    if [[ -z "$rel" ]]; then
+        err "Invalid path"
+        exit 1
+    fi
+    local conf="$DATA_DIR/$profile/packer.conf"
+    if [[ ! -f "$conf" ]]; then
+        err "Profile not found: $profile (run 'packer init $profile' first)"
+        exit 1
+    fi
+    # Check if already tracked
+    while IFS= read -r existing; do
+        if [[ "$existing" == "$rel" ]]; then
+            warn "Already tracked in $profile: ~/$rel"
+            return
+        fi
+    done < <(read_conf "$profile")
+    echo "$rel" >> "$conf"
+    ok "Added ~/$rel to $profile"
+}
+
+cmd_remove() {
+    if [[ $# -lt 2 ]]; then
+        err "Usage: packer remove <profile> <path>"
+        exit 1
+    fi
+    local profile="$1"
+    local raw_path="$2"
+    local rel
+    rel=$(normalize_path "$raw_path")
+    if [[ -z "$rel" ]]; then
+        err "Invalid path"
+        exit 1
+    fi
+    local conf="$DATA_DIR/$profile/packer.conf"
+    if [[ ! -f "$conf" ]]; then
+        err "Profile not found: $profile"
+        exit 1
+    fi
+    if ! grep -qxF "$rel" "$conf" 2>/dev/null; then
+        err "Not tracked in $profile: ~/$rel"
+        exit 1
+    fi
+    local tmp
+    tmp=$(mktemp)
+    grep -vxF "$rel" "$conf" > "$tmp"
+    mv "$tmp" "$conf"
+    ok "Removed ~/$rel from $profile"
+}
+
+cmd_profiles() {
+    local profiles
+    profiles=$(list_profiles)
+    if [[ -z "$profiles" ]]; then
+        warn "No profiles found in $DATA_DIR"
+        info "Run 'packer init <name>' to create one"
+        return
+    fi
+    echo -e "${BOLD}Profiles${RESET} ${DIM}($DATA_DIR)${RESET}"
+    while IFS= read -r p; do
+        local dots_count=0
+        local has_brewfile="no"
+        dots_count=$(read_conf "$p" | wc -l | tr -d ' ')
+        [[ -f "$DATA_DIR/$p/Brewfile" ]] && has_brewfile="yes"
+        echo -e "  ${GREEN}●${RESET} $p  ${DIM}($dots_count dotfiles, brewfile: $has_brewfile)${RESET}"
+    done <<< "$profiles"
+}
+
+cmd_init() {
+    if [[ -z "${1:-}" ]]; then
+        err "Usage: packer init <profile>"
+        exit 1
+    fi
+    local profile="$1"
+    local profile_dir="$DATA_DIR/$profile"
+    if [[ -f "$profile_dir/packer.conf" ]]; then
+        warn "Profile already exists: $profile"
+        return
+    fi
+    mkdir -p "$profile_dir/dotfiles"
+    touch "$profile_dir/packer.conf"
+    ok "Created profile: $profile"
+    info "Add dotfiles with: packer add $profile <path>"
+}
+
+cmd_help() {
+    cat <<USAGE
+packer — sync dotfiles & Homebrew packages
+
+Usage: packer [flags] <command> [args]
+
+Commands:
+  backup  [dots|brew] [profile...]   Back up dotfiles and/or Brewfile
+  restore [dots|brew] [profile...]   Restore dotfiles and/or install Brewfile
+  diff    [profile...]               Show differences between repo and live files
+  list    [profile...]               List tracked paths and their status
+  add     <profile> <path>           Add a path to a profile
+  remove  <profile> <path>           Remove a path from a profile
+  profiles                           List all profiles
+  init    <profile>                  Create a new profile
+  help                               Show this message
+
+Flags:
+  -f, --force           Skip confirmation prompts
+  -n, --dry-run         Preview changes without applying them
+  --data-dir <path>     Override data directory (default: ~/.packer)
+
+Data directory: $DATA_DIR
+
+Examples:
+  packer backup                       # Back up all profiles
+  packer backup dots base             # Back up only base dotfiles
+  packer restore base work            # Restore base, then overlay work
+  packer restore brew work            # Install work Brewfile packages
+  packer diff base                    # Diff only the base profile
+  packer init work                    # Create a new work profile
+  packer add work .ssh/config         # Track .ssh/config in work profile
+  packer -n restore base work         # Preview a layered restore
+USAGE
+}
+
+# ── Argument parsing ─────────────────────────────────────────
+
+main() {
+    # Parse flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--force)    FORCE=true; shift ;;
+            -n|--dry-run)  DRY_RUN=true; shift ;;
+            --data-dir)    DATA_DIR="$2"; shift 2 ;;
+            -*)            err "Unknown flag: $1"; cmd_help; exit 1 ;;
+            *)             break ;;
+        esac
+    done
+
+    local cmd="${1:-help}"
+    shift || true
+
+    ensure_data_dir
+
+    case "$cmd" in
+        backup)
+            local what="${1:-}"
+            case "$what" in
+                dots) shift; cmd_backup_dots "$@" ;;
+                brew) shift; cmd_backup_brew "$@" ;;
+                "")   cmd_backup_dots "$@"; cmd_backup_brew "$@" ;;
+                *)    cmd_backup_dots "$@"; cmd_backup_brew "$@" ;;
+            esac
+            ;;
+        restore)
+            local what="${1:-}"
+            case "$what" in
+                dots) shift; cmd_restore_dots "$@" ;;
+                brew) shift; cmd_restore_brew "$@" ;;
+                "")   cmd_restore_dots "$@"; cmd_restore_brew "$@" ;;
+                *)    cmd_restore_dots "$@"; cmd_restore_brew "$@" ;;
+            esac
+            ;;
+        diff)      cmd_diff "$@" ;;
+        list)      cmd_list "$@" ;;
+        add)       cmd_add "$@" ;;
+        remove)    cmd_remove "$@" ;;
+        profiles)  cmd_profiles ;;
+        init)      cmd_init "$@" ;;
+        help|-h|--help) cmd_help ;;
+        *)         err "Unknown command: $cmd"; cmd_help; exit 1 ;;
+    esac
+}
+
+main "$@"
