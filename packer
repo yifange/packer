@@ -217,17 +217,101 @@ cmd_backup_brew() {
 
     for profile in "${profiles[@]}"; do
         local brewfile="$DATA_DIR/$profile/Brewfile"
-        info "${BOLD}[$profile]${RESET} Generating Brewfile"
-        if $DRY_RUN; then
-            echo "  [dry-run] brew bundle dump → $brewfile"
+        if [[ -f "$brewfile" ]]; then
+            warn "[$profile] Brewfile already exists — skipping (Brewfiles are manually curated)"
+            info "To overwrite, run: packer brew-dump $profile"
+            info "To see untracked packages, run: packer brew-diff"
         else
-            brew bundle dump --file="$brewfile" --force
-            ok "Brewfile written ($(wc -l < "$brewfile" | tr -d ' ') entries)"
-            if [[ $(list_profiles | wc -l) -gt 1 ]]; then
-                warn "Curate $brewfile to contain only $profile-specific packages"
+            info "${BOLD}[$profile]${RESET} Generating initial Brewfile"
+            if $DRY_RUN; then
+                echo "  [dry-run] brew bundle dump → $brewfile"
+            else
+                brew bundle dump --file="$brewfile" --force --describe
+                ok "Brewfile written ($(wc -l < "$brewfile" | tr -d ' ') entries)"
+                warn "Edit $brewfile to keep only $profile-specific packages"
             fi
         fi
     done
+}
+
+# One-time full dump — overwrites an existing Brewfile (requires --force or confirmation)
+cmd_brew_dump() {
+    if [[ -z "${1:-}" ]]; then
+        err "Usage: packer brew-dump <profile>"
+        exit 1
+    fi
+    local profile="$1"
+    if [[ ! -d "$DATA_DIR/$profile" ]]; then
+        err "Profile not found: $profile"
+        exit 1
+    fi
+    local brewfile="$DATA_DIR/$profile/Brewfile"
+    if [[ -f "$brewfile" ]] && ! $FORCE && ! $DRY_RUN; then
+        warn "$brewfile already exists and will be overwritten"
+        echo -en "${YELLOW}Continue? [y/N]${RESET} "
+        read -r answer
+        [[ "$answer" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
+    fi
+    info "${BOLD}[$profile]${RESET} Dumping all installed packages"
+    if $DRY_RUN; then
+        echo "  [dry-run] brew bundle dump → $brewfile"
+    else
+        brew bundle dump --file="$brewfile" --force --describe
+        ok "Brewfile written ($(wc -l < "$brewfile" | tr -d ' ') entries)"
+        warn "Edit $brewfile to keep only $profile-specific packages"
+    fi
+}
+
+# Show packages installed on the system but not in any profile's Brewfile
+cmd_brew_diff() {
+    info "Comparing installed packages against all Brewfiles..."
+
+    # Collect all entries from all profiles' Brewfiles
+    local tracked_file
+    tracked_file=$(mktemp)
+    for profile_dir in "$DATA_DIR"/*/; do
+        local bf="$profile_dir/Brewfile"
+        [[ -f "$bf" ]] || continue
+        # Extract package names: 'brew "foo"' → foo, 'cask "bar"' → bar, 'tap "baz"' → baz
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%%#*}"
+            if [[ "$line" =~ ^(brew|cask|tap)[[:space:]]+\"([^\"]+)\" ]]; then
+                echo "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            fi
+        done < "$bf"
+    done | sort -u > "$tracked_file"
+
+    # Dump current system state to a temp file
+    local system_file
+    system_file=$(mktemp)
+    local system_brewfile
+    system_brewfile=$(mktemp)
+    brew bundle dump --file="$system_brewfile" --force 2>/dev/null
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        if [[ "$line" =~ ^(brew|cask|tap)[[:space:]]+\"([^\"]+)\" ]]; then
+            echo "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+        fi
+    done < "$system_brewfile" | sort -u > "$system_file"
+
+    # Find packages in system but not in any Brewfile
+    local untracked
+    untracked=$(comm -23 "$system_file" "$tracked_file")
+
+    if [[ -z "$untracked" ]]; then
+        ok "All installed packages are tracked in Brewfiles"
+    else
+        echo -e "${BOLD}Installed but not in any Brewfile:${RESET}"
+        while IFS= read -r entry; do
+            local type="${entry%%:*}"
+            local name="${entry#*:}"
+            echo -e "  ${YELLOW}$type${RESET} \"$name\""
+        done <<< "$untracked"
+        echo
+        info "Add these to a profile's Brewfile, or ignore if they're dependencies"
+    fi
+
+    rm -f "$tracked_file" "$system_file" "$system_brewfile"
 }
 
 cmd_restore_brew() {
@@ -506,6 +590,8 @@ Commands:
   init    <profile>                  Create a new profile
   snapshots                          List available snapshots
   rollback [snapshot-id]             Roll back to a snapshot (default: latest)
+  brew-dump <profile>                Full dump of installed packages into a Brewfile
+  brew-diff                          Show packages not tracked by any Brewfile
   help                               Show this message
 
 Flags:
@@ -574,6 +660,8 @@ main() {
         init)      cmd_init "$@" ;;
         snapshots) cmd_snapshots ;;
         rollback)  cmd_rollback "$@" ;;
+        brew-dump) cmd_brew_dump "$@" ;;
+        brew-diff) cmd_brew_diff ;;
         help|-h|--help) cmd_help ;;
         *)         err "Unknown command: $cmd"; cmd_help; exit 1 ;;
     esac

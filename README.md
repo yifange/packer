@@ -211,9 +211,38 @@ packer restore base personal
 
 ## Brewfile Management
 
-`packer backup brew <profile>` runs `brew bundle dump` which captures **all** currently installed packages. When using multiple profiles, you'll want to manually curate each profile's Brewfile to contain only the packages belonging to that profile.
+Brewfiles are **manually curated** — packer will not silently overwrite them. This prevents accidental loss of a carefully split Brewfile when running `packer backup`.
 
-A typical split:
+### Initial setup
+
+When a profile has no Brewfile yet, `packer backup brew` generates one by dumping all installed packages. You then edit it to keep only what belongs to that profile.
+
+```bash
+packer init work
+packer backup brew work       # Creates work/Brewfile with full system dump
+# Edit ~/.packer/work/Brewfile to keep only work-specific packages
+```
+
+If you need to regenerate a Brewfile from scratch (overwrites existing):
+
+```bash
+packer brew-dump base         # Prompts before overwriting
+packer -f brew-dump base      # Force overwrite without prompt
+```
+
+### Finding untracked packages
+
+After installing new packages, use `brew-diff` to see what's not in any Brewfile:
+
+```bash
+packer brew-diff
+# Output:
+#   brew "newpackage"
+#   cask "newapp"
+# Add these to the appropriate profile's Brewfile
+```
+
+### Typical split
 
 **base/Brewfile** — tools you use everywhere:
 ```ruby
