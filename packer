@@ -201,6 +201,8 @@ cmd_restore_dots() {
             else
                 mkdir -p "$(dirname "$dst")"
                 if [[ -d "$src" ]]; then
+                    # --delete keeps dst identical to repo; orphan local files in tracked
+                    # dirs are removed. snapshot_before_restore() preserves a rollback copy.
                     rsync -a --checksum --delete --exclude='.DS_Store' "$src/" "$dst/"
                 else
                     rsync -a --checksum --exclude='.DS_Store' "$src" "$dst"
@@ -599,7 +601,7 @@ Commands:
 Flags:
   -f, --force           Skip confirmation prompts
   -n, --dry-run         Preview changes without applying them
-  --data-dir <path>     Override data directory (default: ~/.packer)
+  --data-dir <path>     Override data directory (default: ~/.packer-data)
 
 Data directory: $DATA_DIR
 
