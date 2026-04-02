@@ -102,6 +102,38 @@ normalize_path() {
     echo "$p"
 }
 
+# ── Snapshots ────────────────────────────────────────────────
+
+SNAPSHOTS_DIR=""  # Set after DATA_DIR is finalized
+
+# Save current live files before restore so they can be rolled back.
+# Takes profile names as arguments; snapshots every file that would be overwritten.
+snapshot_before_restore() {
+    local timestamp
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    local snap_dir="$SNAPSHOTS_DIR/$timestamp"
+    local saved=0
+
+    for profile in "$@"; do
+        while IFS= read -r rel; do
+            local live="$HOME_DIR/$rel"
+            [[ -e "$live" ]] || continue
+            local dst="$snap_dir/$rel"
+            mkdir -p "$(dirname "$dst")"
+            if [[ -d "$live" ]]; then
+                rsync -a --exclude='.DS_Store' "$live/" "$dst/"
+            else
+                rsync -a "$live" "$dst"
+            fi
+            ((saved++))
+        done < <(read_conf "$profile")
+    done
+
+    if [[ $saved -gt 0 ]]; then
+        ok "Snapshot saved: $timestamp ($saved item(s))"
+    fi
+}
+
 # ── Commands ─────────────────────────────────────────────────
 
 cmd_backup_dots() {
@@ -145,6 +177,10 @@ cmd_restore_dots() {
         echo -en "${YELLOW}Restore dotfiles from [${names}]? This will overwrite files in ~. [y/N]${RESET} "
         read -r answer
         [[ "$answer" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
+    fi
+
+    if ! $DRY_RUN; then
+        snapshot_before_restore "${profiles[@]}"
     fi
 
     for profile in "${profiles[@]}"; do
@@ -395,6 +431,64 @@ cmd_init() {
     info "Add dotfiles with: packer add $profile <path>"
 }
 
+cmd_snapshots() {
+    if [[ ! -d "$SNAPSHOTS_DIR" ]]; then
+        info "No snapshots yet"
+        return
+    fi
+    local snaps=()
+    for dir in "$SNAPSHOTS_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        snaps+=("$(basename "$dir")")
+    done
+    if [[ ${#snaps[@]} -eq 0 ]]; then
+        info "No snapshots yet"
+        return
+    fi
+    echo -e "${BOLD}Snapshots${RESET} ${DIM}($SNAPSHOTS_DIR)${RESET}"
+    for snap in "${snaps[@]}"; do
+        local count
+        count=$(find "$SNAPSHOTS_DIR/$snap" -type f | wc -l | tr -d ' ')
+        echo -e "  ${GREEN}●${RESET} $snap  ${DIM}($count file(s))${RESET}"
+    done
+}
+
+cmd_rollback() {
+    local snap_id="${1:-}"
+    if [[ -z "$snap_id" ]]; then
+        # Use the most recent snapshot
+        if [[ ! -d "$SNAPSHOTS_DIR" ]]; then
+            err "No snapshots found"
+            exit 1
+        fi
+        snap_id=$(ls -1 "$SNAPSHOTS_DIR" | sort | tail -1)
+        if [[ -z "$snap_id" ]]; then
+            err "No snapshots found"
+            exit 1
+        fi
+    fi
+    local snap_dir="$SNAPSHOTS_DIR/$snap_id"
+    if [[ ! -d "$snap_dir" ]]; then
+        err "Snapshot not found: $snap_id"
+        exit 1
+    fi
+    info "Rolling back to snapshot: $snap_id"
+    if ! $FORCE && ! $DRY_RUN; then
+        echo -en "${YELLOW}This will overwrite current files with the snapshot. Continue? [y/N]${RESET} "
+        read -r answer
+        [[ "$answer" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
+    fi
+    if $DRY_RUN; then
+        info "Would restore from: $snap_dir"
+        rsync -a --dry-run --itemize-changes "$snap_dir/" "$HOME_DIR/" 2>/dev/null | while IFS= read -r line; do
+            echo "  [dry-run] $line"
+        done
+    else
+        rsync -a "$snap_dir/" "$HOME_DIR/"
+        ok "Rolled back to snapshot $snap_id"
+    fi
+}
+
 cmd_help() {
     cat <<USAGE
 packer — sync dotfiles & Homebrew packages
@@ -410,6 +504,8 @@ Commands:
   remove  <profile> <path>           Remove a path from a profile
   profiles                           List all profiles
   init    <profile>                  Create a new profile
+  snapshots                          List available snapshots
+  rollback [snapshot-id]             Roll back to a snapshot (default: latest)
   help                               Show this message
 
 Flags:
@@ -448,6 +544,7 @@ main() {
     local cmd="${1:-help}"
     shift || true
 
+    SNAPSHOTS_DIR="$DATA_DIR/.snapshots"
     ensure_data_dir
 
     case "$cmd" in
@@ -475,6 +572,8 @@ main() {
         remove)    cmd_remove "$@" ;;
         profiles)  cmd_profiles ;;
         init)      cmd_init "$@" ;;
+        snapshots) cmd_snapshots ;;
+        rollback)  cmd_rollback "$@" ;;
         help|-h|--help) cmd_help ;;
         *)         err "Unknown command: $cmd"; cmd_help; exit 1 ;;
     esac

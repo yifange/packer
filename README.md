@@ -97,6 +97,8 @@ packer restore brew work         # Install only work's Brewfile packages
 
 When restoring multiple profiles, they are applied **in the order specified**. Later profiles overwrite earlier ones for overlapping files. This is the layering mechanism — put shared configs in `base`, machine-specific overrides in `work` or `personal`.
 
+Before any restore, packer automatically snapshots your current live files so you can roll back if needed (see [Snapshots & Rollback](#snapshots--rollback)).
+
 ### Diff
 
 ```bash
@@ -120,6 +122,17 @@ Shows each tracked path and whether it exists in `~` (HOME) and in the repo (REP
 ```bash
 packer profiles                  # List all profiles with summary
 packer init <name>               # Create a new empty profile
+```
+
+### Snapshots & Rollback
+
+Every `restore dots` automatically saves a timestamped snapshot of your current live files to `~/.packer/.snapshots/` before overwriting anything.
+
+```bash
+packer snapshots                 # List all saved snapshots
+packer rollback                  # Roll back to the most recent snapshot
+packer rollback 20260401-153012  # Roll back to a specific snapshot
+packer -n rollback               # Preview what rollback would do
 ```
 
 ### Add / Remove
