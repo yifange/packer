@@ -4,7 +4,7 @@ set -euo pipefail
 # ── Configuration ────────────────────────────────────────────
 
 PACKER_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATA_DIR="${PACKER_DATA_DIR:-$HOME/.packer}"
+DATA_DIR="${PACKER_DATA_DIR:-$HOME/.packer-data}"
 HOME_DIR="$HOME"
 
 # Colors
@@ -63,9 +63,11 @@ list_profiles() {
     if [[ ! -d "$DATA_DIR" ]]; then
         return
     fi
+    local results=()
     for dir in "$DATA_DIR"/*/; do
-        [[ -f "$dir/packer.conf" ]] && basename "$dir"
-    done | sort
+        [[ -d "$dir" && -f "$dir/packer.conf" ]] && results+=("$(basename "$dir")")
+    done
+    printf '%s\n' "${results[@]+"${results[@]}"}" 2>/dev/null | sort
 }
 
 # Resolve profile args: if none given, use all profiles (sorted)
@@ -199,9 +201,9 @@ cmd_restore_dots() {
             else
                 mkdir -p "$(dirname "$dst")"
                 if [[ -d "$src" ]]; then
-                    rsync -a --delete --exclude='.DS_Store' "$src/" "$dst/"
+                    rsync -a --checksum --delete --exclude='.DS_Store' "$src/" "$dst/"
                 else
-                    rsync -a --exclude='.DS_Store' "$src" "$dst"
+                    rsync -a --checksum --exclude='.DS_Store' "$src" "$dst"
                 fi
                 ok "~/$rel"
             fi
@@ -564,11 +566,11 @@ cmd_rollback() {
     fi
     if $DRY_RUN; then
         info "Would restore from: $snap_dir"
-        rsync -a --dry-run --itemize-changes "$snap_dir/" "$HOME_DIR/" 2>/dev/null | while IFS= read -r line; do
+        rsync -a --checksum --dry-run --itemize-changes "$snap_dir/" "$HOME_DIR/" 2>/dev/null | while IFS= read -r line; do
             echo "  [dry-run] $line"
         done
     else
-        rsync -a "$snap_dir/" "$HOME_DIR/"
+        rsync -a --checksum "$snap_dir/" "$HOME_DIR/"
         ok "Rolled back to snapshot $snap_id"
     fi
 }

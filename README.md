@@ -10,7 +10,7 @@ Setting up a new Mac means reinstalling apps, copying config files, and remember
 
 Packer uses a **copy-based** sync strategy. `backup` copies files from your home directory into the data repo. `restore` copies them back. No symlinks, no magic — just `rsync`.
 
-The tool itself (`packer` script) is separate from your data (`~/.packer/`), so you can version-control them independently.
+The tool itself (`packer` script) is separate from your data (`~/.packer-data/`), so you can version-control them independently.
 
 ## Architecture
 
@@ -18,7 +18,7 @@ The tool itself (`packer` script) is separate from your data (`~/.packer/`), so 
 <tool-repo>/                 # Tool repo — just the script
 └── packer
 
-~/.packer/                   # Data repo — your configs and Brewfiles
+~/.packer-data/                   # Data repo — your configs and Brewfiles
 ├── base/                    # Shared across all machines
 │   ├── packer.conf          # List of dotfile paths to track
 │   ├── Brewfile             # Homebrew packages
@@ -56,7 +56,7 @@ packer add base .ssh/config
 packer backup
 
 # 5. Version-control your data
-cd ~/.packer && git init && git add -A && git commit -m "Initial backup"
+cd ~/.packer-data && git init && git add -A && git commit -m "Initial backup"
 ```
 
 ### Restoring on a New Machine
@@ -66,7 +66,7 @@ cd ~/.packer && git init && git add -A && git commit -m "Initial backup"
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 # 2. Clone your data repo
-git clone <your-repo-url> ~/.packer
+git clone <your-repo-url> ~/.packer-data
 
 # 3. Get the packer script (from your tool repo or copy it)
 # 4. Restore
@@ -126,7 +126,7 @@ packer init <name>               # Create a new empty profile
 
 ### Snapshots & Rollback
 
-Every `restore dots` automatically saves a timestamped snapshot of your current live files to `~/.packer/.snapshots/` before overwriting anything.
+Every `restore dots` automatically saves a timestamped snapshot of your current live files to `~/.packer-data/.snapshots/` before overwriting anything.
 
 ```bash
 packer snapshots                 # List all saved snapshots
@@ -156,7 +156,7 @@ packer add work /Users/$USER/.stCommitMsg
 |---|---|
 | `-f`, `--force` | Skip confirmation prompts (useful in scripts) |
 | `-n`, `--dry-run` | Preview what would happen without making changes |
-| `--data-dir <path>` | Override data directory (default: `~/.packer`) |
+| `--data-dir <path>` | Override data directory (default: `~/.packer-data`) |
 
 The data directory can also be set via the `PACKER_DATA_DIR` environment variable.
 
@@ -220,7 +220,7 @@ When a profile has no Brewfile yet, `packer backup brew` generates one by dumpin
 ```bash
 packer init work
 packer backup brew work       # Creates work/Brewfile with full system dump
-# Edit ~/.packer/work/Brewfile to keep only work-specific packages
+# Edit ~/.packer-data/work/Brewfile to keep only work-specific packages
 ```
 
 If you need to regenerate a Brewfile from scratch (overwrites existing):
@@ -273,6 +273,6 @@ No other dependencies. No Python, no Ruby, no Node.
 
 - Run `packer -n restore base work` before an actual restore to preview what will change
 - Use `packer diff` after making config changes to see what's drifted since last backup
-- Keep `~/.packer` as a git repo — commit after each `packer backup` to maintain history
+- Keep `~/.packer-data` as a git repo — commit after each `packer backup` to maintain history
 - Add `alias packer="/path/to/packer"` to your `.zshrc` for convenience
 - `.DS_Store` files are automatically excluded from all operations
