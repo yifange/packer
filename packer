@@ -27,6 +27,10 @@ ok()    { echo -e "${GREEN}✓${RESET} $*"; }
 warn()  { echo -e "${YELLOW}!${RESET} $*"; }
 err()   { echo -e "${RED}✗${RESET} $*" >&2; }
 
+require_brew() {
+    command -v brew >/dev/null 2>&1 || { err "Homebrew is not installed"; exit 1; }
+}
+
 ensure_data_dir() {
     if [[ ! -d "$DATA_DIR" ]]; then
         if $FORCE; then
@@ -216,6 +220,7 @@ cmd_restore_dots() {
 }
 
 cmd_backup_brew() {
+    require_brew
     local profiles=()
     while IFS= read -r p; do profiles+=("$p"); done < <(resolve_profiles "$@")
 
@@ -240,6 +245,7 @@ cmd_backup_brew() {
 
 # One-time full dump — overwrites an existing Brewfile (requires --force or confirmation)
 cmd_brew_dump() {
+    require_brew
     if [[ -z "${1:-}" ]]; then
         err "Usage: packer brew-dump <profile>"
         exit 1
@@ -268,6 +274,7 @@ cmd_brew_dump() {
 
 # Show packages installed on the system but not in any profile's Brewfile
 cmd_brew_diff() {
+    require_brew
     info "Comparing installed packages against all Brewfiles..."
 
     # Collect all entries from all profiles' Brewfiles
@@ -319,6 +326,7 @@ cmd_brew_diff() {
 }
 
 cmd_restore_brew() {
+    require_brew
     local profiles=()
     while IFS= read -r p; do profiles+=("$p"); done < <(resolve_profiles "$@")
 
